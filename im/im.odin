@@ -18,79 +18,24 @@ Renderer :: struct {
 	monitor : c.int,
 }
 
-
 Color :: rl.Color
 Font  :: rl.Font
 Rect  :: rect.Rect
 
-// Putting them in a struct should allow us to push/pop them.
+// Putting them in a struct should allow us to begin/pop them.
 DrawOptions :: struct {
 	font      : Font,
 	font_size : f32,
+	line_height_scale: f32,
 	rect      : Rect,
 	color     : Color,
 	cursor_x, cursor_y : f32,
-
-	// you need to make all required measurements yourself!
-	phase: MeasureDrawPhase,
+	is_scissor : bool,
 }
 
-AmountUnit :: enum {
-	Fraction,       // a fraction between 0-1. WARNING: this unit will be inconsistent for different container widths. 
-					// It trips up measure_draw_phases code - the draw phase may use a narrower container, which fks it up.
-
-	Pixel,          // an absolute value
-	TextLineHeight, // The height of one line of text
-}
-
-MeasureDrawPhase :: enum {
-	Draw,	 // Enables drawing
-	Measure, // Disables drawing for the sake of measurement
-}
-
-// Runs a measure phase followed by a draw phase.
-// The measure phase disables all drawing, so that you can measure your UI.
-// The draw phase re-enables drawing. This is where you draw the UI for real, at the correct location.
-// The system doesn't populate width and height for you. That's your job to do in the 'Measure' phase!
-// We are doing this because we want to avoid implementing a UI layout system. :D (might lead to some stupid consequences, but I think it's fine)
-measure_draw_phases :: proc(m: ^Measurer, ) -> (MeasureDrawPhase, bool) {
-	// every measure_draw_phases causes UI that would have rendered itself once to render itself and all it's children twice. 
-	// the time-complexity will be exponential to the 'depth' of the call tree formed by just the calls to measure_draw_phases. 
-	// Shouldnt be too bad actually I dont think. but all the temporary strings getting re-allocated over and over might get us.
-
-	if m.phase_idx == 0 {
-		m.phase_idx = 1
-		m.stack_idx = r.options_stack_idx
-
-		push();
-		options().phase = .Measure
-		return .Measure, true
-	}
-
-	if m.phase_idx == 1 {
-		m.phase_idx = 2
-
-		pop()
-
-		// Detect whether we've pushed or popped too many things, whle we're at it
-		assert(r.options_stack_idx == m.stack_idx)
-
-		// Ensure the measurement phase is correctly propagated.
-		// Only the root-level call can re-enable draw phase
-		current_phase := options().phase
-
-		push()
-		options().phase = current_phase
-		return .Draw, true
-	}
-
-	pop()
-	return .Measure, false
-}
-
-push_aligned_rect :: proc(rect: Rect, x_align, y_align: f32) {
+begin_aligned_rect :: proc(rect: Rect, x_align, y_align: f32) {
 	if rect == {} {
-		push()
+		begin()
 		return
 	}
 
@@ -104,8 +49,8 @@ push_aligned_rect :: proc(rect: Rect, x_align, y_align: f32) {
 	rect_height := rect.y1 - rect.y0
 	y0 := curr.y0 + y_align * (curr_height - rect_height)
 
-	to_push := Rect{x0, y0, x0 + rect_width, y0 + rect_height}
-	push_rect(to_push);
+	to_begin := Rect{x0, y0, x0 + rect_width, y0 + rect_height}
+	begin_rect(to_begin);
 }
 
 COLOR_RED :: Color{255,0 ,0, 255}
@@ -150,11 +95,12 @@ next_frame :: proc() -> bool {
 	r.options_stack[0] = {
 		font = r.base_font,
 		font_size = 24,
+		line_height_scale = 1.3,
 		color = {255, 255, 255, 255},
 		rect = {
 			x0 = 0, y0 = 0, 
 			x1 = f32(rl.GetScreenWidth()), y1 = f32(rl.GetScreenHeight()),
-		}
+		},
 	}
 
 	return !rl.WindowShouldClose();
@@ -164,18 +110,53 @@ options :: proc() -> ^DrawOptions {
 	return &r.options_stack[r.options_stack_idx]
 }
 
-push :: proc() {
+width :: proc() -> f32 {
+	o := options()
+	return rect.width(o.rect);
+}
+
+height :: proc() -> f32 {
+	o := options()
+	return rect.height(o.rect);
+}
+
+rect :: proc() -> Rect {
+	o := options()
+	return o.rect
+}
+
+begin :: proc() {
 	r.options_stack_idx += 1
 	assert(r.options_stack_idx < len(r.options_stack))
 	r.options_stack[r.options_stack_idx] = r.options_stack[r.options_stack_idx - 1]
+
+	// Some things shouldn't be inherited.
+	options().is_scissor = false
 }
 
-push_rect :: proc(rect: Rect) {
-	push();
+begin_rect :: proc(rect: Rect) {
+	begin();
 	options().rect = rect
 }
 
-pop :: proc() {
+clip_rect :: proc() {
+	o := options()
+	if !o.is_scissor {
+		o.is_scissor = true
+		rl.BeginScissorMode(
+			c.int(o.rect.x0),
+			c.int(o.rect.y0),
+			c.int(o.rect.x1 - o.rect.x0),
+			c.int(o.rect.y1 - o.rect.y0),
+		)
+	}
+}
+
+end :: proc() {
+	if options().is_scissor {
+		rl.EndScissorMode()
+	}
+
 	if r.options_stack_idx > 0 {
 		r.options_stack_idx -= 1
 	}
@@ -184,15 +165,13 @@ pop :: proc() {
 clear_rect :: proc() {
 	o := options()
 
-	if o.phase == .Draw {
-		rl.DrawRectangle(
-			c.int(o.rect.x0), 
-			c.int(o.rect.y0),
-			c.int(o.rect.x1 - o.rect.x0),
-			c.int(o.rect.y1 - o.rect.y0),
-			o.color
-		)
-	}
+	rl.DrawRectangle(
+		c.int(o.rect.x0), 
+		c.int(o.rect.y0),
+		c.int(o.rect.x1 - o.rect.x0),
+		c.int(o.rect.y1 - o.rect.y0),
+		o.color
+	)
 }
 
 is_word_wrap_boundary :: proc(str: string, pos: int) -> bool {
@@ -201,7 +180,7 @@ is_word_wrap_boundary :: proc(str: string, pos: int) -> bool {
 
 // A lot of the string -> cstring conversion shenanigans I've had to do to draw text with raylib
 // have resulted in a bunch of temporary allocations that I feel were not  necessary to begin with.
-// Additionally, instead of pushing to a temp allocator and freeing at the end of the frame, why not just 
+// Additionally, instead of begining to a temp allocator and freeing at the end of the frame, why not just 
 // constantly reset the temp allocator in each function? it's not compatible with other kinds of temp-allocator
 // use-cases that are truly temporary in nature though. 
 
@@ -251,10 +230,8 @@ rect_draw_text :: proc(text: string) -> (f32, f32) {
 
 		x := o.rect.x0 + o.cursor_x
 		y := o.rect.y0 + o.cursor_y
-		if o.phase == .Draw {
-			// TODO: figure out how to make the text we render here actually look nice
-			rl.DrawTextEx(o.font, cstr, {x, y}, o.font_size, 0, o.color)
-		}
+		// TODO: figure out how to make the text we render here actually look nice
+		rl.DrawTextEx(o.font, cstr, {x, y}, o.font_size, 0, o.color)
 
 		o.cursor_x += text_width
 	}
@@ -262,72 +239,24 @@ rect_draw_text :: proc(text: string) -> (f32, f32) {
 	return o.cursor_x, o.cursor_y
 }
 
-to_pixels :: proc(amount: f32, unit: AmountUnit, proportional_size: f32) -> (result: f32) {
-	switch unit {
-	case .Fraction:
-		result = proportional_size * amount
-	case .Pixel:
-		result = amount
-	case .TextLineHeight:
-		result = options().font_size * amount
-	}
-	return
+begin_split_x :: proc(x0: ^f32, w: f32) {
+	rect := options().rect
+	rect.x0 = x0^
+	rect.x1 = x0^ + w
+
+	x0^ += w
+
+	begin_rect(rect);
 }
 
-push_rect_left_split :: proc(amount: f32, unit: AmountUnit) {
-	o := options()
+begin_split_y :: proc(y0: ^f32, h: f32) {
+	rect := options().rect
+	rect.y0 = y0^
+	rect.y1 = y0^ + h
 
-	offset := to_pixels(amount, unit, o.rect.x1 - o.rect.x0);
-	m := o.rect.x0 + offset
+	y0^ += h
 
-	to_push := o.rect
-	to_push.x1 = m
-
-	o.rect.x0 = m
-
-	push_rect(to_push)
-}
-
-push_rect_right_split :: proc(amount: f32, unit: AmountUnit) {
-	o := options()
-
-	offset := to_pixels(amount, unit, o.rect.x1 - o.rect.x0);
-	m := o.rect.x1 - offset
-
-	to_push := o.rect
-	to_push.x0 = m
-
-	o.rect.x1 = m
-
-	push_rect(to_push)
-}
-
-push_rect_top_split :: proc(amount: f32, unit: AmountUnit) {
-	o := options()
-
-	offset := to_pixels(amount, unit, o.rect.y1 - o.rect.y0);
-	m := o.rect.y0 + offset
-
-	to_push := o.rect
-	to_push.y1 = m
-
-	o.rect.y0 = m
-
-	push_rect(to_push)
-}
-
-push_rect_bottom_split :: proc(amount: f32, unit: AmountUnit) {
-	o := options()
-
-	offset := to_pixels(amount, unit, o.rect.y1 - o.rect.y0);
-	m := o.rect.y1 - offset
-
-	to_push := o.rect
-	to_push.y0 = m
-
-	o.rect.y1 = m
-
-	push_rect(to_push)
+	begin_rect(rect);
 }
 
 rect_dims :: proc(o: ^DrawOptions) -> (f32, f32) {
@@ -343,7 +272,6 @@ lerp :: proc(a, b, t: f32) -> f32 {
 	return a + (b - a) * t
 }
 
-Measurer :: struct {
-	stack_idx : int,
-	phase_idx : int,
+line_height :: proc() -> f32 {
+	return options().font_size * options().line_height_scale
 }

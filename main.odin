@@ -13,8 +13,10 @@ import "core:mem"
 current_folder := ""
 current_folder_parent := ""
 current_entries: []os.File_Info
-entry_idx: int
+selected_entry_idx: int
 folder_to_move_to: string = ""
+
+history: [dynamic]string
 
 BACKGROUND :: im.Color{255, 255, 255, 255}
 FOREGROUND :: im.Color{0, 0, 0, 255}
@@ -41,10 +43,10 @@ move_to_folder :: proc(folder: string) {
 		return get_order(a) < get_order(b)
 	});
 
-	entry_idx = 0
+	selected_entry_idx = 0
 	for entry, i in entries {
 		if entry.fullpath == current_folder {
-			entry_idx = i
+			selected_entry_idx = i
 			break
 		}
 	}
@@ -53,10 +55,10 @@ move_to_folder :: proc(folder: string) {
 		os.file_info_slice_delete(current_entries, context.allocator)
 	}
 	current_entries       = entries
-	if current_folder != "" {
-		delete(current_folder)
-	}
+
+	append(&history, current_folder)
 	current_folder        = folder
+
 	current_folder_parent = os.dir(current_folder)
 }
 
@@ -68,64 +70,98 @@ main :: proc() {
 	assert(err == nil)
 	move_to_folder(folder)
 
-	// TODO: Do this in our code
-	rl.SetExitKey(.ESCAPE)
-
 	for im.next_frame() {
-		// do rendering
+		if is_close_pressed() {
+			break
+		}
+
 		im.options().color = BACKGROUND
 		im.clear_rect()
 
-		directory_row("..", .Directory, current_folder_parent, entry_idx == -1)
-		for entry, i in current_entries {
-			directory_row(entry.name, entry.type, entry.fullpath, i == entry_idx)
-		}
+		im.options().color = FOREGROUND
+		im.options().font_size = 30
+
+		m := im.rect().y0
+
+		im.begin_split_y(&m, im.line_height()); {
+			im.clip_rect()
+			im.rect_draw_text("history")
+			for path, i in history {
+				if i > 0 {
+					im.rect_draw_text(" -> ")
+				}
+				im.rect_draw_text(path)
+			}
+		}; im.end()
+
+		im.begin_split_y(&m, im.height()); {
+			m := im.rect().y0
+			im.begin_split_y(&m, im.line_height()); {
+				directory_row("..", .Directory, current_folder_parent, selected_entry_idx == -1)
+			}; im.end()
+			for entry, i in current_entries {
+				im.begin_split_y(&m, im.line_height()); {
+					directory_row(entry.name, entry.type, entry.fullpath, i == selected_entry_idx)
+				}; im.end()
+			}
+		}; im.end()
 
 		if folder_to_move_to != "" {
 			move_to_folder(strings.clone(folder_to_move_to))
 			folder_to_move_to = ""
 		}
 
+		handled := true
 		if is_down_pressed() {
-			entry_idx = min(len(current_entries) - 1, entry_idx + 1)
+			selected_entry_idx += 1
+		} else if is_up_pressed() {
+			selected_entry_idx -= 1
+		} else if is_page_down_pressed() {
+			selected_entry_idx += 10
+		} else if is_page_up_pressed() {
+			selected_entry_idx -= 10
+		} else if is_home_pressed() {
+			selected_entry_idx = -1
+		} else if (is_end_pressed()) {
+			selected_entry_idx = len(current_entries) -1
+		} else {
+			handled = false;
 		}
 
-		if is_up_pressed() {
-			entry_idx = max(-1, entry_idx - 1)
+		if handled {
+			if selected_entry_idx < -1 {
+				selected_entry_idx = -1
+			} else if selected_entry_idx > len(current_entries) -1 {
+				selected_entry_idx = len(current_entries) -1
+			}
 		}
 	}
 }
 
 directory_row :: proc(name: string, type: os.File_Type, dir: string, selected: bool) {
-	im.push_rect_top_split(1.4, .TextLineHeight); {
-		if selected {
-			im.options().color = FOREGROUND
-			im.clear_rect()
-			im.options().color = BACKGROUND
-		} else {
-			im.options().color = FOREGROUND
-		}
-		im.options().font_size = 30
+	if selected {
+		im.options().color = FOREGROUND
+		im.clear_rect()
+		im.options().color = BACKGROUND
+	} else {
+		im.options().color = FOREGROUND
+	}
 
-		start := im.options().cursor_x
+	start := im.options().cursor_x
+	im.rect_draw_textf("%v", name)
 
-		im.rect_draw_textf("%v", name)
+	im.options().cursor_x = max(im.options().cursor_x + 40, start + 400)
 
+	im.rect_draw_textf("%v", type)
+
+	if selected && type == .Directory {
 		im.options().cursor_x += 40
-		if (im.options().cursor_x < start + 200) {
-			im.options().cursor_x = start + 200
-		}
-		im.rect_draw_textf("%v", type)
+		im.rect_draw_textf("[Enter]")
 
-		if selected && type == .Directory {
-			im.options().cursor_x += 40
-			im.rect_draw_textf("[Enter]")
-
-			if is_enter_pressed() {
-				folder_to_move_to = dir
-			}
+		if is_enter_pressed() {
+			folder_to_move_to = dir
 		}
-	}; im.pop();
+	}
 }
 
 is_key_pressed_or_repeated :: proc(key: rl.KeyboardKey) -> bool {
@@ -140,8 +176,28 @@ is_down_pressed :: proc() -> bool {
 	return is_key_pressed_or_repeated(.J) || is_key_pressed_or_repeated(.DOWN)
 }
 
+is_home_pressed :: proc() -> bool {
+	return is_key_pressed_or_repeated(.HOME)
+}
+
+is_end_pressed :: proc() -> bool {
+	return is_key_pressed_or_repeated(.END)
+}
+
+is_page_down_pressed :: proc() -> bool {
+	return is_key_pressed_or_repeated(.PAGE_DOWN)
+}
+
+is_page_up_pressed :: proc() -> bool {
+	return is_key_pressed_or_repeated(.PAGE_UP)
+}
+
 is_enter_pressed :: proc() -> bool {
 	return rl.IsKeyPressed(.ENTER)
+}
+
+is_close_pressed :: proc() -> bool {
+	return rl.IsKeyDown(.LEFT_CONTROL) && rl.IsKeyPressed(.W)
 }
 
 is_back_pressed :: proc() -> bool {
