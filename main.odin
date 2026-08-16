@@ -2,84 +2,19 @@ package main
 
 import "core:strings"
 import "im"
-import "core:fmt"
 import rl "vendor:raylib"
 import "im/rect"
 import "core:os"
-import "core:path/filepath"
-import "core:slice"
-import "core:mem"
-
-current_folder := ""
-current_folder_parent := ""
-current_entries: []os.File_Info
-selected_entry_idx: int
-folder_to_move_to: string = ""
-
-history: [dynamic]string
 
 BACKGROUND :: im.Color{255, 255, 255, 255}
 FOREGROUND :: im.Color{0, 0, 0, 255}
-
-move_to_folder :: proc(folder: string) {
-	if folder == current_folder {
-		return
-	}
-
-	entries, err := os.read_all_directory_by_path(folder, context.allocator);
-	if err != nil {
-		// TODO: present error to user
-		return
-	}
-
-	slice.sort_by(entries, proc(a, b: os.File_Info) -> bool {
-		get_order :: proc(i: os.File_Info) -> int {
-			if i.type == .Regular {
-				return  1
-			}
-			return 0
-		}
-
-		return get_order(a) < get_order(b)
-	});
-
-	selected_entry_idx = 0
-	for entry, i in entries {
-		if entry.fullpath == current_folder {
-			selected_entry_idx = i
-			break
-		}
-	}
-
-	if len(current_entries) > 0 {
-		os.file_info_slice_delete(current_entries, context.allocator)
-	}
-	current_entries       = entries
-
-	can_append := true
-	if len(history) > 0 {
-		last_folder := history[len(history) - 1]
-		if last_folder == folder {
-			last := pop(&history)
-			delete(last)
-			can_append = false
-		}
-	}
-	if can_append {
-		append(&history, current_folder)
-	}
-	current_folder        = folder
-
-	current_folder_parent = os.dir(current_folder)
-}
+ERROR :: im.Color{255, 0, 0, 255}
 
 main :: proc() {
 	im.init_renderer("Terminal", "./font/IBMPlexMono-Regular.ttf");
 	defer im.destroy_renderer();
 
-	folder, err := os.get_executable_directory(context.allocator)
-	assert(err == nil)
-	move_to_folder(folder)
+	init_program()
 
 	for im.next_frame() {
 		if is_close_pressed() {
@@ -132,7 +67,12 @@ main :: proc() {
 		}; im.end()
 
 		im.begin_split_y(&m, im.height()); {
-			im.rect_draw_textf("%v items", len(current_entries))
+			im.rect_draw_textf("%v items | ", len(current_entries))
+
+			if current_error != "" {
+				im.options().color = ERROR
+				im.rect_draw_textf("%v", current_error)
+			}
 		}; im.end()
 
 		if is_back_pressed() {
@@ -150,19 +90,22 @@ main :: proc() {
 		}
 
 		handled := true
-		if is_down_pressed() {
+		switch {
+		case is_down_pressed():
 			selected_entry_idx += 1
-		} else if is_up_pressed() {
+		case is_up_pressed():
 			selected_entry_idx -= 1
-		} else if is_page_down_pressed() {
+		case is_page_down_pressed():
 			selected_entry_idx += 10
-		} else if is_page_up_pressed() {
+		case is_page_up_pressed():
 			selected_entry_idx -= 10
-		} else if is_home_pressed() {
+		case is_home_pressed():
 			selected_entry_idx = -1
-		} else if (is_end_pressed()) {
+		case is_end_pressed():
 			selected_entry_idx = len(current_entries) -1
-		} else {
+		case is_key_pressed_or_repeated(.T):
+			open_terminal_here()
+		case:
 			handled = false;
 		}
 
