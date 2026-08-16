@@ -239,22 +239,22 @@ rect_draw_text :: proc(text: string) -> (f32, f32) {
 	return o.cursor_x, o.cursor_y
 }
 
-begin_split_x :: proc(x0: ^f32, w: f32) {
+begin_split_x :: proc(x0: ^f32, x1: f32) {
 	rect := options().rect
 	rect.x0 = x0^
-	rect.x1 = x0^ + w
+	rect.x1 = x1
 
-	x0^ += w
+	x0^ = x1
 
 	begin_rect(rect);
 }
 
-begin_split_y :: proc(y0: ^f32, h: f32) {
+begin_split_y :: proc(y0: ^f32, y1: f32) {
 	rect := options().rect
 	rect.y0 = y0^
-	rect.y1 = y0^ + h
+	rect.y1 = y1
 
-	y0^ += h
+	y0^ = y1
 
 	begin_rect(rect);
 }

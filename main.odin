@@ -56,7 +56,18 @@ move_to_folder :: proc(folder: string) {
 	}
 	current_entries       = entries
 
-	append(&history, current_folder)
+	can_append := true
+	if len(history) > 0 {
+		last_folder := history[len(history) - 1]
+		if last_folder == folder {
+			last := pop(&history)
+			delete(last)
+			can_append = false
+		}
+	}
+	if can_append {
+		append(&history, current_folder)
+	}
 	current_folder        = folder
 
 	current_folder_parent = os.dir(current_folder)
@@ -81,10 +92,9 @@ main :: proc() {
 		im.options().color = FOREGROUND
 		im.options().font_size = 30
 
+		// m could become a part of im somehow??
 		m := im.rect().y0
-
-		im.begin_split_y(&m, im.line_height()); {
-			im.clip_rect()
+		im.begin_split_y(&m, im.height()); {
 			im.rect_draw_text("history")
 			for path, i in history {
 				if i > 0 {
@@ -92,19 +102,47 @@ main :: proc() {
 				}
 				im.rect_draw_text(path)
 			}
+			m = im.options().cursor_y + im.line_height()
+		}; im.end()
+
+		status_bar_height := im.line_height()
+
+		im.begin_split_y(&m, im.height() - status_bar_height); {
+			im.clip_rect()
+
+			im.begin(); {
+				scroll_point := im.height() / 2
+				scroll_to_item := f32(selected_entry_idx) * im.line_height()
+				if scroll_to_item > scroll_point {
+					im.options().rect.y0 = im.options().rect.y0 - scroll_to_item + scroll_point
+				}
+
+				m := im.rect().y0
+				height := im.line_height()
+				im.begin_split_y(&m, m + height); {
+					directory_row("..", .Directory, current_folder_parent, selected_entry_idx == -1)
+				}; im.end()
+
+				for entry, i in current_entries {
+					im.begin_split_y(&m, m + height); {
+						directory_row(entry.name, entry.type, entry.fullpath, i == selected_entry_idx)
+					}; im.end()
+				}
+			}; im.end()
 		}; im.end()
 
 		im.begin_split_y(&m, im.height()); {
-			m := im.rect().y0
-			im.begin_split_y(&m, im.line_height()); {
-				directory_row("..", .Directory, current_folder_parent, selected_entry_idx == -1)
-			}; im.end()
-			for entry, i in current_entries {
-				im.begin_split_y(&m, im.line_height()); {
-					directory_row(entry.name, entry.type, entry.fullpath, i == selected_entry_idx)
-				}; im.end()
-			}
+			im.rect_draw_textf("%v items", len(current_entries))
 		}; im.end()
+
+		if is_back_pressed() {
+			if len(history) > 0 {
+				// NOTE: Revisiting the last visited folder will
+				// automatically pop it from the history, so we don't
+				// need to do that here
+				folder_to_move_to = history[len(history) - 1]
+			}
+		}
 
 		if folder_to_move_to != "" {
 			move_to_folder(strings.clone(folder_to_move_to))
@@ -154,11 +192,20 @@ directory_row :: proc(name: string, type: os.File_Type, dir: string, selected: b
 
 	im.rect_draw_textf("%v", type)
 
-	if selected && type == .Directory {
-		im.options().cursor_x += 40
-		im.rect_draw_textf("[Enter]")
+	im.options().cursor_x += 40
 
-		if is_enter_pressed() {
+	if name == ".." {
+		im.rect_draw_textf("[<-]")
+
+		if is_left_pressed() {
+			folder_to_move_to = current_folder_parent
+		} 
+	}
+
+	if selected && type == .Directory {
+		im.rect_draw_textf("[Enter] or [->]")
+
+		if is_enter_pressed() || is_right_pressed() {
 			folder_to_move_to = dir
 		}
 	}
@@ -170,6 +217,14 @@ is_key_pressed_or_repeated :: proc(key: rl.KeyboardKey) -> bool {
 
 is_up_pressed :: proc() -> bool {
 	return is_key_pressed_or_repeated(.K) || is_key_pressed_or_repeated(.UP)
+}
+
+is_left_pressed :: proc() -> bool {
+	return is_key_pressed_or_repeated(.H) || is_key_pressed_or_repeated(.LEFT)
+}
+
+is_right_pressed :: proc() -> bool {
+	return is_key_pressed_or_repeated(.L) || is_key_pressed_or_repeated(.RIGHT)
 }
 
 is_down_pressed :: proc() -> bool {
