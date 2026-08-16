@@ -1,84 +1,149 @@
 package main
 
+import "core:strings"
 import "im"
+import "core:fmt"
+import rl "vendor:raylib"
+import "im/rect"
 import "core:os"
 import "core:path/filepath"
+import "core:slice"
+import "core:mem"
 
-current_folder := "."
+current_folder := ""
+current_folder_parent := ""
 current_entries: []os.File_Info
+entry_idx: int
+folder_to_move_to: string = ""
 
-update_current_folder :: proc(folder: string) {
-	current_folder = folder
+BACKGROUND :: im.Color{255, 255, 255, 255}
+FOREGROUND :: im.Color{0, 0, 0, 255}
+
+move_to_folder :: proc(folder: string) {
+	if folder == current_folder {
+		return
+	}
 
 	entries, err := os.read_all_directory_by_path(folder, context.allocator);
-	assert(err == nil);
+	if err != nil {
+		// TODO: present error to user
+		return
+	}
 
-	if len(current_entries) != 0 { os.file_info_slice_delete(current_entries, context.allocator) }
-	current_entries = entries
+	slice.sort_by(entries, proc(a, b: os.File_Info) -> bool {
+		get_order :: proc(i: os.File_Info) -> int {
+			if i.type == .Regular {
+				return  1
+			}
+			return 0
+		}
+
+		return get_order(a) < get_order(b)
+	});
+
+	entry_idx = 0
+	for entry, i in entries {
+		if entry.fullpath == current_folder {
+			entry_idx = i
+			break
+		}
+	}
+
+	if len(current_entries) > 0 {
+		os.file_info_slice_delete(current_entries, context.allocator)
+	}
+	current_entries       = entries
+	if current_folder != "" {
+		delete(current_folder)
+	}
+	current_folder        = folder
+	current_folder_parent = os.dir(current_folder)
 }
 
 main :: proc() {
-	r := im.init_renderer("Terminal", "./font/IBMPlexMono-Regular.ttf");
-	defer im.destroy_renderer(r);
+	im.init_renderer("Terminal", "./font/IBMPlexMono-Regular.ttf");
+	defer im.destroy_renderer();
 
-	path, err := os.get_executable_path(context.allocator)
+	folder, err := os.get_executable_directory(context.allocator)
 	assert(err == nil)
-	defer delete(path)
+	move_to_folder(folder)
 
-	folder := filepath.dir(path)
+	// TODO: Do this in our code
+	rl.SetExitKey(.ESCAPE)
 
-	update_current_folder(folder)
+	for im.next_frame() {
+		// do rendering
+		im.options().color = BACKGROUND
+		im.clear_rect()
 
-	for im.next_frame(r) {
-		im.options(r).color = {255, 255, 255, 255}
-		im.clear_rect(r)
+		directory_row("..", .Directory, current_folder_parent, entry_idx == -1)
+		for entry, i in current_entries {
+			directory_row(entry.name, entry.type, entry.fullpath, i == entry_idx)
+		}
 
-		im.options(r).color = {0, 0, 0, 255}
-		im.options(r).font_size = 30
+		if folder_to_move_to != "" {
+			move_to_folder(strings.clone(folder_to_move_to))
+			folder_to_move_to = ""
+		}
 
-		dims: im.Measurer; 
-		for im.measure_draw_phases(r, &dims) {
-			im.push_aligned_rect(r, dims.rect, 0.5, 0.5); {
-				dark_theme(r);
+		if is_down_pressed() {
+			entry_idx = min(len(current_entries) - 1, entry_idx + 1)
+		}
 
-				if len(current_entries) > 0 {
-					max_width : f32 = 0
-					im.push(r); {
-						for entry in current_entries {
-							x, y := im.rect_draw_textf(r, "%v", entry.name)
-							im.rect_pad_top(r, 1, .TextLineHeight)
-							max_width = max(x, max_width)
-						}
-					}; im.pop(r);
-
-					im.rect_pad_left(r, max_width + 40, .Pixel);
-
-					im.push(r); {
-						for entry in current_entries {
-							im.rect_draw_textf(r, "%v", "what")
-							im.rect_pad_top(r, 1, .TextLineHeight)
-						}
-					}; im.pop(r)
-				} else {
-					im.rect_draw_text(r, "This directory's got nothing xd");
-				}
-			}; im.pop(r);
+		if is_up_pressed() {
+			entry_idx = max(-1, entry_idx - 1)
 		}
 	}
 }
 
-light_theme :: proc(r: ^im.Renderer) {
-	im.push(r); {
-		im.options(r).color = {255, 255, 255, 255}
-		im.clear_rect(r)
-	}; im.pop(r);
-	im.options(r).color = {0, 0, 0, 255}
+directory_row :: proc(name: string, type: os.File_Type, dir: string, selected: bool) {
+	im.push_rect_top_split(1.4, .TextLineHeight); {
+		if selected {
+			im.options().color = FOREGROUND
+			im.clear_rect()
+			im.options().color = BACKGROUND
+		} else {
+			im.options().color = FOREGROUND
+		}
+		im.options().font_size = 30
+
+		start := im.options().cursor_x
+
+		im.rect_draw_textf("%v", name)
+
+		im.options().cursor_x += 40
+		if (im.options().cursor_x < start + 200) {
+			im.options().cursor_x = start + 200
+		}
+		im.rect_draw_textf("%v", type)
+
+		if selected && type == .Directory {
+			im.options().cursor_x += 40
+			im.rect_draw_textf("[Enter]")
+
+			if is_enter_pressed() {
+				folder_to_move_to = dir
+			}
+		}
+	}; im.pop();
 }
 
-dark_theme :: proc(r: ^im.Renderer) {
-	im.push(r); {
-		im.options(r).color = {0, 0, 0, 255}
-		im.clear_rect(r)
-	}; im.pop(r);
-	im.options(r).color = {255, 255, 255, 255}
+is_key_pressed_or_repeated :: proc(key: rl.KeyboardKey) -> bool {
+	return rl.IsKeyPressed(key) || rl.IsKeyPressedRepeat(key)
+}
+
+is_up_pressed :: proc() -> bool {
+	return is_key_pressed_or_repeated(.K) || is_key_pressed_or_repeated(.UP)
+}
+
+is_down_pressed :: proc() -> bool {
+	return is_key_pressed_or_repeated(.J) || is_key_pressed_or_repeated(.DOWN)
+}
+
+is_enter_pressed :: proc() -> bool {
+	return rl.IsKeyPressed(.ENTER)
+}
+
+is_back_pressed :: proc() -> bool {
+	return rl.IsKeyPressed(.ESCAPE)
 }

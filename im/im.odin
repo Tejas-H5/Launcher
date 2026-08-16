@@ -5,6 +5,9 @@ package im
 import "core:fmt"
 import "core:c"
 import rl "vendor:raylib"
+import "rect"
+
+r: ^Renderer
 
 Renderer :: struct {
 	base_font         : Font,
@@ -15,22 +18,21 @@ Renderer :: struct {
 	monitor : c.int,
 }
 
-Rect :: struct {
-	x0, y0, x1, y1: f32,
-}
 
 Color :: rl.Color
 Font  :: rl.Font
+Rect  :: rect.Rect
 
 // Putting them in a struct should allow us to push/pop them.
 DrawOptions :: struct {
-	font       : Font,
-	font_size  : f32,
-	rect       : Rect,
-	color      : Color,
+	font      : Font,
+	font_size : f32,
+	rect      : Rect,
+	color     : Color,
+	cursor_x, cursor_y : f32,
 
-	// measurement
-	measurer: ^Measurer,
+	// you need to make all required measurements yourself!
+	phase: MeasureDrawPhase,
 }
 
 AmountUnit :: enum {
@@ -41,12 +43,17 @@ AmountUnit :: enum {
 	TextLineHeight, // The height of one line of text
 }
 
+MeasureDrawPhase :: enum {
+	Draw,	 // Enables drawing
+	Measure, // Disables drawing for the sake of measurement
+}
+
 // Runs a measure phase followed by a draw phase.
 // The measure phase disables all drawing, so that you can measure your UI.
 // The draw phase re-enables drawing. This is where you draw the UI for real, at the correct location.
 // The system doesn't populate width and height for you. That's your job to do in the 'Measure' phase!
 // We are doing this because we want to avoid implementing a UI layout system. :D (might lead to some stupid consequences, but I think it's fine)
-measure_draw_phases :: proc(r: ^Renderer, m: ^Measurer) -> bool {
+measure_draw_phases :: proc(m: ^Measurer, ) -> (MeasureDrawPhase, bool) {
 	// every measure_draw_phases causes UI that would have rendered itself once to render itself and all it's children twice. 
 	// the time-complexity will be exponential to the 'depth' of the call tree formed by just the calls to measure_draw_phases. 
 	// Shouldnt be too bad actually I dont think. but all the temporary strings getting re-allocated over and over might get us.
@@ -55,38 +62,39 @@ measure_draw_phases :: proc(r: ^Renderer, m: ^Measurer) -> bool {
 		m.phase_idx = 1
 		m.stack_idx = r.options_stack_idx
 
-		push(r);
-		options(r).measurer = m
-		return true
+		push();
+		options().phase = .Measure
+		return .Measure, true
 	}
 
 	if m.phase_idx == 1 {
 		m.phase_idx = 2
 
-		pop(r)
+		pop()
 
 		// Detect whether we've pushed or popped too many things, whle we're at it
 		assert(r.options_stack_idx == m.stack_idx)
 
-		// Ensure the measurer is correctly propagated.
-		current_measurer := options(r).measurer
+		// Ensure the measurement phase is correctly propagated.
+		// Only the root-level call can re-enable draw phase
+		current_phase := options().phase
 
-		push(r)
-		options(r).measurer = current_measurer
-		return true
+		push()
+		options().phase = current_phase
+		return .Draw, true
 	}
 
-	pop(r)
-	return false
+	pop()
+	return .Measure, false
 }
 
-push_aligned_rect :: proc(r: ^Renderer, rect: Rect, x_align, y_align: f32) {
+push_aligned_rect :: proc(rect: Rect, x_align, y_align: f32) {
 	if rect == {} {
-		push(r)
+		push()
 		return
 	}
 
-	curr := options(r).rect
+	curr := options().rect
 
 	curr_width := curr.x1 - curr.x0
 	rect_width := rect.x1 - rect.x0
@@ -97,38 +105,38 @@ push_aligned_rect :: proc(r: ^Renderer, rect: Rect, x_align, y_align: f32) {
 	y0 := curr.y0 + y_align * (curr_height - rect_height)
 
 	to_push := Rect{x0, y0, x0 + rect_width, y0 + rect_height}
-	push_rect(r, to_push);
+	push_rect(to_push);
 }
 
 COLOR_RED :: Color{255,0 ,0, 255}
 
-init_renderer :: proc(window_title: cstring, font_dir: cstring) -> ^Renderer {
+init_renderer :: proc(window_title: cstring, font_dir: cstring) {
 	rl.InitWindow(800, 600, window_title)
 	rl.SetWindowState({.WINDOW_MAXIMIZED, .WINDOW_RESIZABLE})
 	rl.SetExitKey(.KEY_NULL)
 
 	font := rl.LoadFontEx(font_dir, 128, nil, 250)
 
-	r := new_clone(Renderer{base_font = font})
+	r = new_clone(Renderer{base_font = font})
 	r.options_stack = make([]DrawOptions, 64)
 	r.monitor = -1
 	
 	rl.BeginDrawing();
-
-	return r
 }
 
-destroy_renderer :: proc(r: ^Renderer) {
+destroy_renderer :: proc() {
 	rl.CloseWindow();
 	delete(r.options_stack);
 	free(r)
+	r = nil
 }
 
-// It's actually an Odin iterator.
-next_frame :: proc(r: ^Renderer) -> bool {
+// It's actually an iterator.
+next_frame :: proc() -> bool {
 	rl.EndDrawing()
 
 	// --- frame boundary
+	free_all(context.temp_allocator)
 
 	monitor := rl.GetCurrentMonitor()
 	if r.monitor != monitor {
@@ -152,31 +160,31 @@ next_frame :: proc(r: ^Renderer) -> bool {
 	return !rl.WindowShouldClose();
 }
 
-options :: proc(r: ^Renderer) -> ^DrawOptions {
+options :: proc() -> ^DrawOptions {
 	return &r.options_stack[r.options_stack_idx]
 }
 
-push :: proc(r: ^Renderer) {
+push :: proc() {
 	r.options_stack_idx += 1
 	assert(r.options_stack_idx < len(r.options_stack))
 	r.options_stack[r.options_stack_idx] = r.options_stack[r.options_stack_idx - 1]
 }
 
-push_rect :: proc(r: ^Renderer, rect: Rect) {
-	push(r);
-	options(r).rect = rect
+push_rect :: proc(rect: Rect) {
+	push();
+	options().rect = rect
 }
 
-pop :: proc(r: ^Renderer) {
+pop :: proc() {
 	if r.options_stack_idx > 0 {
 		r.options_stack_idx -= 1
 	}
 }
 
-clear_rect :: proc(r: ^Renderer) {
-	o := options(r)
+clear_rect :: proc() {
+	o := options()
 
-	if o.measurer == nil {
+	if o.phase == .Draw {
 		rl.DrawRectangle(
 			c.int(o.rect.x0), 
 			c.int(o.rect.y0),
@@ -184,9 +192,6 @@ clear_rect :: proc(r: ^Renderer) {
 			c.int(o.rect.y1 - o.rect.y0),
 			o.color
 		)
-	} else {
-		// no call to accumulate_measurement_internal here.
-		// clearing the background to some color shouldn't accumulate the current content size
 	}
 }
 
@@ -200,16 +205,19 @@ is_word_wrap_boundary :: proc(str: string, pos: int) -> bool {
 // constantly reset the temp allocator in each function? it's not compatible with other kinds of temp-allocator
 // use-cases that are truly temporary in nature though. 
 
-rect_draw_textf :: proc(r: ^Renderer, format: string, args: ..any) -> (f32, f32) {
+rect_draw_textf :: proc(format: string, args: ..any) -> (f32, f32) {
+	if len(args) == 0 {
+		return rect_draw_text(format)
+	}
+
 	str := fmt.tprintf(format, ..args)
-	return rect_draw_text(r, str)
+	return rect_draw_text(str)
 }
 
 // Draws some text inside the current rectangle, with wrapping and clipping overflow
-rect_draw_text :: proc(r: ^Renderer, text: string) -> (f32, f32) {
-	o := options(r)
+rect_draw_text :: proc(text: string) -> (f32, f32) {
+	o := options()
 
-	cursor_x, cursor_y : f32 = 0, 0
 	width  := o.rect.x1 - o.rect.x0
 	height := o.rect.y1 - o.rect.y0
 
@@ -218,7 +226,7 @@ rect_draw_text :: proc(r: ^Renderer, text: string) -> (f32, f32) {
 		end := start
 		defer start = end
 
-		if cursor_y > height {
+		if o.cursor_y > height {
 			break
 		}
 
@@ -234,44 +242,42 @@ rect_draw_text :: proc(r: ^Renderer, text: string) -> (f32, f32) {
 		cstr := fmt.ctprint(text[start:end])
 
 		text_width := rl.MeasureTextEx(o.font, cstr, o.font_size, 0).x
-		cursor_x_next := cursor_x + text_width
+		cursor_x_next := o.cursor_x + text_width
 		if cursor_x_next > width {
 			// Wrap the text
-			cursor_x = 0
-			cursor_y += o.font_size
+			o.cursor_x = 0
+			o.cursor_y += o.font_size
 		}
 
-		x := o.rect.x0 + cursor_x
-		y := o.rect.y0 + cursor_y
-		if o.measurer == nil {
+		x := o.rect.x0 + o.cursor_x
+		y := o.rect.y0 + o.cursor_y
+		if o.phase == .Draw {
 			// TODO: figure out how to make the text we render here actually look nice
 			rl.DrawTextEx(o.font, cstr, {x, y}, o.font_size, 0, o.color)
-		} else {
-			accumulate_measurement_internal(o.measurer, {x, y, x + text_width, y + o.font_size});
 		}
 
-		cursor_x = cursor_x + text_width
+		o.cursor_x += text_width
 	}
 
-	return cursor_x, cursor_y
+	return o.cursor_x, o.cursor_y
 }
 
-to_pixels :: proc(r: ^Renderer, amount: f32, unit: AmountUnit, proportional_size: f32) -> (result: f32) {
+to_pixels :: proc(amount: f32, unit: AmountUnit, proportional_size: f32) -> (result: f32) {
 	switch unit {
 	case .Fraction:
 		result = proportional_size * amount
 	case .Pixel:
 		result = amount
 	case .TextLineHeight:
-		result = options(r).font_size * amount
+		result = options().font_size * amount
 	}
 	return
 }
 
-push_rect_left_split :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
-	o := options(r)
+push_rect_left_split :: proc(amount: f32, unit: AmountUnit) {
+	o := options()
 
-	offset := to_pixels(r, amount, unit, o.rect.x1 - o.rect.x0);
+	offset := to_pixels(amount, unit, o.rect.x1 - o.rect.x0);
 	m := o.rect.x0 + offset
 
 	to_push := o.rect
@@ -279,13 +285,13 @@ push_rect_left_split :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
 
 	o.rect.x0 = m
 
-	push_rect(r, to_push)
+	push_rect(to_push)
 }
 
-push_rect_right_split :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
-	o := options(r)
+push_rect_right_split :: proc(amount: f32, unit: AmountUnit) {
+	o := options()
 
-	offset := to_pixels(r, amount, unit, o.rect.x1 - o.rect.x0);
+	offset := to_pixels(amount, unit, o.rect.x1 - o.rect.x0);
 	m := o.rect.x1 - offset
 
 	to_push := o.rect
@@ -293,13 +299,13 @@ push_rect_right_split :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
 
 	o.rect.x1 = m
 
-	push_rect(r, to_push)
+	push_rect(to_push)
 }
 
-push_rect_top_split :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
-	o := options(r)
+push_rect_top_split :: proc(amount: f32, unit: AmountUnit) {
+	o := options()
 
-	offset := to_pixels(r, amount, unit, o.rect.y1 - o.rect.y0);
+	offset := to_pixels(amount, unit, o.rect.y1 - o.rect.y0);
 	m := o.rect.y0 + offset
 
 	to_push := o.rect
@@ -307,13 +313,13 @@ push_rect_top_split :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
 
 	o.rect.y0 = m
 
-	push_rect(r, to_push)
+	push_rect(to_push)
 }
 
-push_rect_bottom_split :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
-	o := options(r)
+push_rect_bottom_split :: proc(amount: f32, unit: AmountUnit) {
+	o := options()
 
-	offset := to_pixels(r, amount, unit, o.rect.y1 - o.rect.y0);
+	offset := to_pixels(amount, unit, o.rect.y1 - o.rect.y0);
 	m := o.rect.y1 - offset
 
 	to_push := o.rect
@@ -321,7 +327,7 @@ push_rect_bottom_split :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
 
 	o.rect.y1 = m
 
-	push_rect(r, to_push)
+	push_rect(to_push)
 }
 
 rect_dims :: proc(o: ^DrawOptions) -> (f32, f32) {
@@ -333,42 +339,6 @@ rect_dims :: proc(o: ^DrawOptions) -> (f32, f32) {
 	return width, height
 }
 
-rect_pad :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
-	o := options(r)
-
-	pad_x := to_pixels(r, amount, unit, o.rect.x1 - o.rect.x0)
-	pad_y := to_pixels(r, amount, unit, o.rect.y1 - o.rect.y0)
-
-	o.rect.x0 += pad_x
-	o.rect.x1 -= pad_x
-	o.rect.y0 += pad_y
-	o.rect.y1 -= pad_y
-}
-
-rect_pad_right :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
-	o := options(r)
-	pad_x := to_pixels(r, amount, unit, o.rect.x1 - o.rect.x0)
-	o.rect.x1 -= pad_x
-}
-
-rect_pad_left :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
-	o := options(r)
-	pad_x := to_pixels(r, amount, unit, o.rect.x1 - o.rect.x0)
-	o.rect.x0 += pad_x
-}
-
-rect_pad_top :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
-	o := options(r)
-	pad_y := to_pixels(r, amount, unit, o.rect.y1 - o.rect.y0)
-	o.rect.y0 += pad_y
-}
-
-rect_pad_bottom :: proc(r: ^Renderer, amount: f32, unit: AmountUnit) {
-	o := options(r)
-	pad_y := to_pixels(r, amount, unit, o.rect.y1 - o.rect.y0)
-	o.rect.y1 -= pad_y
-}
-
 lerp :: proc(a, b, t: f32) -> f32 {
 	return a + (b - a) * t
 }
@@ -376,17 +346,4 @@ lerp :: proc(a, b, t: f32) -> f32 {
 Measurer :: struct {
 	stack_idx : int,
 	phase_idx : int,
-	rect: Rect,
-}
-
-accumulate_measurement_internal :: proc(m: ^Measurer, rect: Rect) {
-	if m.rect == {} {
-		m.rect = rect
-		return
-	}
-
-	m.rect.x0 = min(m.rect.x0, rect.x0);
-	m.rect.y0 = min(m.rect.y0, rect.y0);
-	m.rect.x1 = max(m.rect.x1, rect.x1);
-	m.rect.y1 = max(m.rect.y1, rect.y1);
 }
