@@ -81,8 +81,6 @@ next_frame :: proc() -> bool {
 	rl.EndDrawing()
 
 	// --- frame boundary
-	free_all(context.temp_allocator)
-
 	monitor := rl.GetCurrentMonitor()
 	if r.monitor != monitor {
 		r.monitor = monitor
@@ -137,6 +135,8 @@ begin :: proc() {
 begin_rect :: proc(rect: Rect) {
 	begin();
 	options().rect = rect
+	options().cursor_x = 0
+	options().cursor_y = 0
 }
 
 clip_rect :: proc() {

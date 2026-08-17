@@ -1,3 +1,5 @@
 *.exe
 *.pdb
 *.rdi
+save.bin
+save.json

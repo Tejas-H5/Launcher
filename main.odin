@@ -10,11 +10,16 @@ BACKGROUND :: im.Color{255, 255, 255, 255}
 FOREGROUND :: im.Color{0, 0, 0, 255}
 ERROR :: im.Color{255, 0, 0, 255}
 
+folder_to_move_to := ""
+
 main :: proc() {
 	im.init_renderer("Terminal", "./font/IBMPlexMono-Regular.ttf");
 	defer im.destroy_renderer();
 
 	init_program()
+	free_all(context.temp_allocator)
+
+	s := &global_state
 
 	for im.next_frame() {
 		if is_close_pressed() {
@@ -31,12 +36,14 @@ main :: proc() {
 		m := im.rect().y0
 		im.begin_split_y(&m, im.height()); {
 			im.rect_draw_text("history")
-			for path, i in history {
+			for entry, i in s.history {
 				if i > 0 {
 					im.rect_draw_text(" -> ")
 				}
-				im.rect_draw_text(path)
+				im.rect_draw_text(entry.folder)
 			}
+			im.rect_draw_text(" -> ")
+			im.rect_draw_text(s.current_folder)
 			m = im.options().cursor_y + im.line_height()
 		}; im.end()
 
@@ -47,7 +54,7 @@ main :: proc() {
 
 			im.begin(); {
 				scroll_point := im.height() / 2
-				scroll_to_item := f32(selected_entry_idx) * im.line_height()
+				scroll_to_item := f32(s.selected_entry_idx) * im.line_height()
 				if scroll_to_item > scroll_point {
 					im.options().rect.y0 = im.options().rect.y0 - scroll_to_item + scroll_point
 				}
@@ -55,66 +62,83 @@ main :: proc() {
 				m := im.rect().y0
 				height := im.line_height()
 				im.begin_split_y(&m, m + height); {
-					directory_row("..", .Directory, current_folder_parent, selected_entry_idx == -1)
+					directory_row("..", .Directory, "..", s.selected_entry_idx == -1)
 				}; im.end()
 
 				for entry, i in current_entries {
 					im.begin_split_y(&m, m + height); {
-						directory_row(entry.name, entry.type, entry.fullpath, i == selected_entry_idx)
+						directory_row(entry.name, entry.type, entry.fullpath, i == s.selected_entry_idx)
 					}; im.end()
 				}
 			}; im.end()
 		}; im.end()
 
 		im.begin_split_y(&m, im.height()); {
-			im.rect_draw_textf("%v items | ", len(current_entries))
+			im.rect_draw_textf("%v items", len(current_entries))
+
+			im.rect_draw_textf(" | %v saves", save_count)
 
 			if current_error != "" {
-				im.options().color = ERROR
-				im.rect_draw_textf("%v", current_error)
+				im.rect_draw_textf(" | ")
+
+				im.begin(); {
+					im.options().color = ERROR
+					im.rect_draw_textf("%v", current_error)
+				}; im.end();
 			}
 		}; im.end()
 
 		if is_back_pressed() {
-			if len(history) > 0 {
+			if len(s.history) > 0 {
 				// NOTE: Revisiting the last visited folder will
 				// automatically pop it from the history, so we don't
 				// need to do that here
-				folder_to_move_to = history[len(history) - 1]
+				folder_to_move_to = s.history[len(s.history) - 1].folder
 			}
 		}
 
 		if folder_to_move_to != "" {
-			move_to_folder(strings.clone(folder_to_move_to))
+			if folder_to_move_to == ".." {
+				folder_to_move_to = os.dir(s.current_folder)
+			}
+			move_to_folder(s, strings.clone(folder_to_move_to))
 			folder_to_move_to = ""
+			requesting_save = true
 		}
 
 		handled := true
 		switch {
 		case is_down_pressed():
-			selected_entry_idx += 1
+			s.selected_entry_idx += 1
 		case is_up_pressed():
-			selected_entry_idx -= 1
+			s.selected_entry_idx -= 1
 		case is_page_down_pressed():
-			selected_entry_idx += 10
+			s.selected_entry_idx += 10
 		case is_page_up_pressed():
-			selected_entry_idx -= 10
+			s.selected_entry_idx -= 10
 		case is_home_pressed():
-			selected_entry_idx = -1
+			s.selected_entry_idx = -1
 		case is_end_pressed():
-			selected_entry_idx = len(current_entries) -1
+			s.selected_entry_idx = len(current_entries) -1
 		case is_key_pressed_or_repeated(.T):
-			open_terminal_here()
+			open_terminal_here(s)
 		case:
 			handled = false;
 		}
 
 		if handled {
-			if selected_entry_idx < -1 {
-				selected_entry_idx = -1
-			} else if selected_entry_idx > len(current_entries) -1 {
-				selected_entry_idx = len(current_entries) -1
+			if s.selected_entry_idx < -1 {
+				s.selected_entry_idx = -1
+			} else if s.selected_entry_idx > len(current_entries) -1 {
+				s.selected_entry_idx = len(current_entries) -1
 			}
+		}
+
+		free_all(context.temp_allocator)
+
+		if requesting_save {
+			requesting_save = false
+			save_state()
 		}
 	}
 }
@@ -141,7 +165,7 @@ directory_row :: proc(name: string, type: os.File_Type, dir: string, selected: b
 		im.rect_draw_textf("[<-]")
 
 		if is_left_pressed() {
-			folder_to_move_to = current_folder_parent
+			folder_to_move_to = ".."
 		} 
 	}
 
