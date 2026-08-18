@@ -61,20 +61,42 @@ main :: proc() {
 
 				m := im.rect().y0
 				height := im.line_height()
-				im.begin_split_y(&m, m + height); {
-					directory_row("..", .Directory, "..", s.selected_entry_idx == -1)
-				}; im.end()
 
-				for entry, i in current_entries {
+				if !s.viewing_bookmarks {
 					im.begin_split_y(&m, m + height); {
-						directory_row(entry.name, entry.type, entry.fullpath, i == s.selected_entry_idx)
+						draw_folder_entry({
+							fullpath   = "..",
+							name       = "..",
+							type       = .Folder,
+						}, s.selected_entry_idx == -1)
+					}; im.end()
+				} else {
+					im.begin_split_y(&m, m + height); {
+						im.rect_draw_textf("====== Bookmarks ======")
+					}; im.end()
+				}
+
+				if len(current_folder_entries) > 0 {
+					for entry, i in current_folder_entries {
+						is_selected := i == s.selected_entry_idx
+						im.begin_split_y(&m, m + height); {
+							draw_folder_entry(entry, is_selected)
+						}; im.end()
+					}
+				} else {
+					im.begin_split_y(&m, m + height); {
+						if s.viewing_bookmarks {
+							im.rect_draw_textf("Use [B] to bookmark some folders")
+						} else {
+							im.rect_draw_textf("Empty folder")
+						}
 					}; im.end()
 				}
 			}; im.end()
 		}; im.end()
 
 		im.begin_split_y(&m, im.height()); {
-			im.rect_draw_textf("%v items", len(current_entries))
+			im.rect_draw_textf("%v items", len(current_folder_entries))
 
 			im.rect_draw_textf(" | %v saves", save_count)
 
@@ -101,9 +123,12 @@ main :: proc() {
 			if folder_to_move_to == ".." {
 				folder_to_move_to = os.dir(s.current_folder)
 			}
-			move_to_folder(s, strings.clone(folder_to_move_to))
+
+			if folder_to_move_to != s.current_folder {
+				move_to_folder(s, strings.clone(folder_to_move_to))
+				requesting_save = true
+			}
 			folder_to_move_to = ""
-			requesting_save = true
 		}
 
 		handled := true
@@ -119,9 +144,15 @@ main :: proc() {
 		case is_home_pressed():
 			s.selected_entry_idx = -1
 		case is_end_pressed():
-			s.selected_entry_idx = len(current_entries) -1
+			s.selected_entry_idx = len(current_folder_entries) -1
 		case is_key_pressed_or_repeated(.T):
 			open_terminal_here(s)
+		case is_key_pressed_or_repeated(.B):
+			if rl.IsKeyDown(.LEFT_SHIFT) {
+				set_viewing_bookmarks(s, !s.viewing_bookmarks)
+			} else {
+				toggle_bookmarked(s, s.current_folder)
+			}
 		case:
 			handled = false;
 		}
@@ -129,8 +160,8 @@ main :: proc() {
 		if handled {
 			if s.selected_entry_idx < -1 {
 				s.selected_entry_idx = -1
-			} else if s.selected_entry_idx > len(current_entries) -1 {
-				s.selected_entry_idx = len(current_entries) -1
+			} else if s.selected_entry_idx > len(current_folder_entries) -1 {
+				s.selected_entry_idx = len(current_folder_entries) -1
 			}
 		}
 
@@ -143,7 +174,7 @@ main :: proc() {
 	}
 }
 
-directory_row :: proc(name: string, type: os.File_Type, dir: string, selected: bool) {
+draw_folder_entry :: proc(entry: FolderEntry, selected: bool) {
 	if selected {
 		im.options().color = FOREGROUND
 		im.clear_rect()
@@ -153,15 +184,20 @@ directory_row :: proc(name: string, type: os.File_Type, dir: string, selected: b
 	}
 
 	start := im.options().cursor_x
-	im.rect_draw_textf("%v", name)
+	im.rect_draw_textf("%v", entry.name)
 
 	im.options().cursor_x = max(im.options().cursor_x + 40, start + 400)
 
-	im.rect_draw_textf("%v", type)
+	switch entry.type {
+	case .File:
+		im.rect_draw_textf("File")
+	case .Folder:
+		im.rect_draw_textf("Folder")
+	}
 
 	im.options().cursor_x += 40
 
-	if name == ".." {
+	if entry.name == ".." {
 		im.rect_draw_textf("[<-]")
 
 		if is_left_pressed() {
@@ -169,11 +205,15 @@ directory_row :: proc(name: string, type: os.File_Type, dir: string, selected: b
 		} 
 	}
 
-	if selected && type == .Directory {
+	if entry.bookmarked {
+		im.rect_draw_textf("Bookmarked")
+	}
+
+	if selected && entry.type == .Folder {
 		im.rect_draw_textf("[Enter] or [->]")
 
 		if is_enter_pressed() || is_right_pressed() {
-			folder_to_move_to = dir
+			folder_to_move_to = entry.fullpath
 		}
 	}
 }

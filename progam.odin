@@ -8,9 +8,52 @@ import "core:strings"
 import "core:encoding/cbor"
 import "core:encoding/json"
 
-current_entries: []os.File_Info
+ItemType :: enum {
+	File,
+	Folder,
+}
+
+Arena :: struct {
+	alloc: mem.Allocator,
+	arena: mem.Arena,
+}
+
+file_picker_arena: Arena
+
+make_arena :: proc(arena: ^Arena, bytes: int) {
+	memory := make([]byte, bytes)
+	mem.arena_init(&arena.arena, memory)
+	// mem.arena_allocator Requires `arena` to already have a fixed position in memory,
+	// so we can't return -> Arena here
+	arena.alloc = mem.arena_allocator(&arena.arena)
+}
+
+// Transitioning from one folder to another requires we hold onto
+// memory from the previous view while creating the next view.
+
+FolderEntry :: struct {
+	fullpath   : string,
+	name       : string,
+	type       : ItemType,
+	bookmarked : bool,
+}
+current_folder_entries: []FolderEntry
 current_error := ""
 save_count := 0
+
+move_to_idx_if_present :: proc(s: ^State, folder: string) -> bool {
+	moved := false
+
+	for entry, i in current_folder_entries {
+		if entry.fullpath == folder {
+			s.selected_entry_idx = i
+			moved = true
+			break
+		}
+	}
+
+	return moved
+}
 
 HistoryEntry :: struct {
 	folder: string,
@@ -25,8 +68,14 @@ delete_history_entry :: proc(history: HistoryEntry) {
 // This will eventually be persisted
 State :: struct {
 	current_folder: string,
+
 	selected_entry_idx: int,
+	last_bookmark_idx: int,
+	last_entry_idx: int,
+
 	history: [dynamic; 256]HistoryEntry,
+	bookmarked_folders: [dynamic; 256]string,
+	viewing_bookmarks: bool,
 }
 
 global_state: State
@@ -96,7 +145,9 @@ load_state :: proc(temp_allocator := context.temp_allocator) {
 }
 
 init_program :: proc() {
-	load_state()
+	make_arena(&file_picker_arena, 10 * mem.Megabyte)
+
+	// load_state()
 
 	folder := global_state.current_folder
 	if folder == "" {
@@ -107,89 +158,55 @@ init_program :: proc() {
 		folder = working_dir
 	}
 
-	global_state.current_folder = ""
 	move_to_folder(&global_state, folder)
 }
 
 move_to_folder :: proc(s: ^State, folder: string) {
 	update_errorf("")
 
-	if folder == s.current_folder {
-		return
-	}
-
-	entries, err := os.read_all_directory_by_path(folder, context.allocator);
-	if err != nil {
-		update_errorf("Error moving around: %v", err);
-		return
-	}
-
-	slice.sort_by(entries, proc(a, b: os.File_Info) -> bool {
-		get_order :: proc(i: os.File_Info) -> int {
-			if i.type == .Regular {
-				return  1
-			}
-			return 0
-		}
-
-		return get_order(a) < get_order(b)
-	});
-
-
-	old_entries := current_entries
-	old_entries_selected_entry_idx := s.selected_entry_idx
-	defer if len(old_entries) > 0 {
-		os.file_info_slice_delete(old_entries, context.allocator)
-	}
-
-	s.selected_entry_idx = 0
-	current_entries = entries
-
-	move_to_idx_if_present :: proc(s: ^State, entries: []os.File_Info, folder: string) -> bool {
-		moved := false
-
-		for entry, i in entries {
-			if entry.fullpath == folder {
-				s.selected_entry_idx = i
-				moved = true
-				break
-			}
-		}
-
-		return moved
-	}
-	moved := move_to_idx_if_present(s, entries, s.current_folder)
-
-	if s.current_folder != "" {
-		can_append := true
+	prev_folder := s.current_folder
+	prev_selected_folder := ""
+	can_append_history := prev_folder != ""
+	pop_history := false
+	if can_append_history {
 		if len(s.history) > 0 {
-			last_history_entry := s.history[len(s.history) - 1]
-			if last_history_entry.folder == folder {
-				pop(&s.history)
-				defer delete_history_entry(last_history_entry)
-
-				can_append = false
-				move_to_idx_if_present(s, entries, last_history_entry.selected_folder)
+			last_history := s.history[len(s.history) - 1]
+			if last_history.folder == folder {
+				pop_history = true
+				can_append_history = false
 			}
 		}
 
-		if can_append {
-			selected_folder := ""
-			if len(old_entries) > 0 {
-				if old_entries_selected_entry_idx >= 0 && old_entries_selected_entry_idx < len(old_entries) {
-					selected_folder = strings.clone(old_entries[old_entries_selected_entry_idx].fullpath)
-				}
+		if can_append_history {
+			prev_selected, ok := slice.get(current_folder_entries, s.selected_entry_idx)
+			if ok {
+				prev_selected_folder = strings.clone(prev_selected.fullpath)
 			}
-
-			append(&s.history, HistoryEntry{
-				folder          = s.current_folder,
-				selected_folder = selected_folder,
-			})
-		} else {
-			delete(s.current_folder)
 		}
 	}
-	s.current_folder = folder
+
+	s.current_folder    = folder
+	s.viewing_bookmarks = false
+
+	recompute_current_folder_entries(s)
+
+	// store history regardless of whether updating the view worked
+
+	if pop_history {
+		// We moved somewhere that we stored the selected folder for
+		last := pop(&s.history)
+		move_to_idx_if_present(s, last.selected_folder)
+	} else {
+		// We moved out of a folder
+		move_to_idx_if_present(s, s.current_folder)
+	}
+
+	if can_append_history {
+		append(&s.history, HistoryEntry{
+			folder = prev_folder,
+			selected_folder = prev_selected_folder
+		})
+	}
 }
 
 update_errorf :: proc(format: string, args: ..any) {
@@ -213,4 +230,104 @@ open_terminal_here :: proc(s: ^State) {
 		update_errorf("Error opening terminal here: %v", os.error_string(err));
 		return
 	}
+}
+
+toggle_bookmarked :: proc(s: ^State, folder: string) {
+	idx := int(-1)
+	for bookmarked_folder, i in s.bookmarked_folders {
+		if bookmarked_folder == folder {
+			idx = i
+			break
+		}
+	}
+
+	if idx != -1 {
+		unordered_remove(&s.bookmarked_folders, idx)
+	} else {
+		append(&s.bookmarked_folders, folder)
+	}
+
+	recompute_current_folder_entries(s)
+}
+
+set_viewing_bookmarks :: proc(s: ^State, viewing_bookmarks: bool) {
+	s.viewing_bookmarks = viewing_bookmarks
+	requesting_save = true
+	recompute_current_folder_entries(s)
+}
+
+is_bookmarked :: proc(s: ^State, fullpath: string) -> bool {
+	for bookmarked_folder in s.bookmarked_folders {
+		if bookmarked_folder == fullpath {
+			return true
+		}
+	}
+	return false
+}
+
+recompute_current_folder_entries :: proc(s: ^State) -> bool {
+	update_errorf("")
+
+	if s.viewing_bookmarks {
+		s.last_bookmark_idx = s.selected_entry_idx
+	} else {
+		s.last_entry_idx = s.selected_entry_idx
+	}
+
+	arena := file_picker_arena.alloc
+	if s.viewing_bookmarks {
+		free_all(arena)
+		current_folder_entries = make([]FolderEntry, len(s.bookmarked_folders), arena)
+		for bookmarked_folder, i in s.bookmarked_folders {
+			current_folder_entries[i] = FolderEntry{
+				fullpath = bookmarked_folder,
+				name     = os.base(bookmarked_folder),
+				type     = .Folder,
+				bookmarked = true,
+			}
+		}
+
+		s.selected_entry_idx = s.last_bookmark_idx
+		s.selected_entry_idx = clamp(s.selected_entry_idx, 0, len(current_folder_entries) - 1)
+	} else {
+		entries, err := os.read_all_directory_by_path(s.current_folder, context.allocator);
+		defer os.file_info_slice_delete(entries, context.allocator)
+		if err != nil {
+			update_errorf("Error enumerating %v: %v", s.current_folder, err);
+			return false
+		}
+
+		free_all(arena)
+		current_folder_entries = make([]FolderEntry, len(entries), arena)
+		for entry, i in entries {
+			type := ItemType.File
+			if entry.type == .Directory {
+				type = .Folder
+			}
+
+			current_folder_entries[i] = FolderEntry{
+				name     = strings.clone(entry.name, allocator=arena),
+				fullpath = strings.clone(entry.fullpath, allocator=arena),
+				type     = type,
+				bookmarked = is_bookmarked(s, entry.fullpath),
+			}
+		}
+
+		slice.sort_by(current_folder_entries[:], proc(a, b: FolderEntry) -> bool {
+			get_order :: proc(entry: FolderEntry) -> int {
+				switch entry.type {
+				case .File: return 1;
+				case .Folder: return 0;
+				}
+				unreachable()
+			}
+
+			return get_order(a) < get_order(b)
+		});
+
+		s.selected_entry_idx = s.last_entry_idx
+		s.selected_entry_idx = clamp(s.selected_entry_idx, -1, len(current_folder_entries) - 1)
+	}
+
+	return true
 }
