@@ -3,3 +3,4 @@
 *.rdi
 save.bin
 save.json
+/build

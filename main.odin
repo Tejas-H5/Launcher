@@ -12,7 +12,8 @@ FOREGROUND :: im.Color{0, 0, 0, 255}
 ERROR :: im.Color{255, 0, 0, 255}
 
 main :: proc() {
-	im.init_renderer("Terminal", "./font/IBMPlexMono-Regular.ttf");
+	font := #load(`./font/IBMPlexMono-Regular.ttf`)
+	im.init_renderer_memory_font("launcher", font);
 	defer im.destroy_renderer();
 
 	init_program()
@@ -52,19 +53,13 @@ main :: proc() {
 				m := im.rect().y0
 				height := im.line_height()
 
-				if !s.viewing_bookmarks {
-					im.begin_split_y(&m, m + height); {
-						draw_folder_entry({
-							fullpath   = "..",
-							name       = "..",
-							type       = .Folder,
-						}, selected_entry_idx == -1)
-					}; im.end()
-				} else {
-					im.begin_split_y(&m, m + height); {
-						im.rect_draw_textf("====== Bookmarks ======")
-					}; im.end()
-				}
+				im.begin_split_y(&m, m + height); {
+					draw_folder_entry({
+						fullpath   = "..",
+						name       = "..",
+						type       = .Folder,
+					}, selected_entry_idx == -1)
+				}; im.end()
 
 				if len(current_folder_entries) > 0 {
 					for entry, i in current_folder_entries {
@@ -75,11 +70,7 @@ main :: proc() {
 					}
 				} else {
 					im.begin_split_y(&m, m + height); {
-						if s.viewing_bookmarks {
-							im.rect_draw_textf("Use [B] to bookmark some folders")
-						} else {
-							im.rect_draw_textf("Empty folder")
-						}
+						im.rect_draw_textf("Empty folder")
 					}; im.end()
 				}
 			}; im.end()
@@ -127,13 +118,6 @@ main :: proc() {
 			}
 		case is_left_pressed():
 			folder_to_move_to = ".."
-		case is_key_pressed_or_repeated(.B):
-			if s.viewing_bookmarks {
-				toggle_temp_bookmarked(s, s.current_folder)
-			} else {
-				bookmark_folder(s, s.current_folder)
-				set_viewing_bookmarks(s, true)
-			}
 		case:
 			handled = false;
 		}
@@ -143,7 +127,7 @@ main :: proc() {
 				folder_to_move_to = os.dir(s.current_folder)
 			}
 
-			if s.viewing_bookmarks || folder_to_move_to != s.current_folder {
+			if folder_to_move_to != s.current_folder {
 				move_to_folder(s, strings.clone(folder_to_move_to))
 				requesting_save = true
 			}
@@ -196,10 +180,6 @@ draw_folder_entry :: proc(entry: FolderEntry, selected: bool) {
 
 	if entry.name == ".." {
 		im.rect_draw_textf("[<-]")
-	}
-
-	if entry.bookmarked {
-		im.rect_draw_textf("Bookmarked")
 	}
 
 	if selected && entry.type == .Folder {

@@ -56,18 +56,28 @@ begin_aligned_rect :: proc(rect: Rect, x_align, y_align: f32) {
 COLOR_RED :: Color{255,0 ,0, 255}
 
 init_renderer :: proc(window_title: cstring, font_dir: cstring) {
+	_init_renderer(window_title)
+	r.base_font = rl.LoadFontEx(font_dir, 128, nil, 250)
+}
+
+init_renderer_memory_font :: proc(window_title: cstring, font: []byte) {
+	_init_renderer(window_title)
+	r.base_font = rl.LoadFontFromMemory(".ttf", raw_data(font), c.int(len(font)), 128, nil, 0)
+}
+
+// Make sure to initialize resources _After_ initializing raylib
+_init_renderer :: proc(window_title: cstring) {
 	rl.InitWindow(800, 600, window_title)
 	rl.SetWindowState({.WINDOW_MAXIMIZED, .WINDOW_RESIZABLE})
 	rl.SetExitKey(.KEY_NULL)
 
-	font := rl.LoadFontEx(font_dir, 128, nil, 250)
-
-	r = new_clone(Renderer{base_font = font})
+	r = new(Renderer)
 	r.options_stack = make([]DrawOptions, 64)
 	r.monitor = -1
 	
 	rl.BeginDrawing();
 }
+
 
 destroy_renderer :: proc() {
 	rl.CloseWindow();
