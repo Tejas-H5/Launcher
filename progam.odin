@@ -38,6 +38,7 @@ FolderEntry :: struct {
 	bookmarked : bool,
 }
 current_folder_entries: []FolderEntry
+selected_entry_idx: int
 current_error := ""
 save_count := 0
 
@@ -46,7 +47,7 @@ move_to_idx_if_present :: proc(s: ^State, folder: string) -> bool {
 
 	for entry, i in current_folder_entries {
 		if entry.fullpath == folder {
-			s.selected_entry_idx = i
+			selected_entry_idx = i
 			moved = true
 			break
 		}
@@ -55,25 +56,12 @@ move_to_idx_if_present :: proc(s: ^State, folder: string) -> bool {
 	return moved
 }
 
-HistoryEntry :: struct {
-	folder: string,
-	selected_folder: string,
-}
-
-delete_history_entry :: proc(history: HistoryEntry) {
-	delete(history.folder)
-	delete(history.selected_folder)
-}
-
 // This will eventually be persisted
 State :: struct {
 	current_folder: string,
-
-	selected_entry_idx: int,
 	last_bookmark_idx: int,
 	last_entry_idx: int,
 
-	history: [dynamic; 256]HistoryEntry,
 	bookmarked_folders: [dynamic; 256]string,
 	viewing_bookmarks: bool,
 }
@@ -83,6 +71,7 @@ SAVE_FILE :: "./save.bin"
 SAVE_FILE_JSON :: "./save.json"
 
 requesting_save: bool
+requesting_recomput_entries: bool
 
 // Frees the temp allocator btw
 save_state :: proc(temp_allocator := context.temp_allocator) {
@@ -93,11 +82,6 @@ save_state :: proc(temp_allocator := context.temp_allocator) {
 		return
 	}
 
-	fmt.println("before saved")
-	for entry, i in global_state.history {
-		fmt.println(i, entry.folder)
-	}
-
 	w := os.to_writer(file)
 	marshall_err := cbor.marshal_into_writer(w, global_state, temp_allocator=temp_allocator)
 	if marshall_err != nil {
@@ -105,11 +89,6 @@ save_state :: proc(temp_allocator := context.temp_allocator) {
 		return
 	}
 	defer free_all(temp_allocator)
-
-	fmt.println("saved")
-	for entry, i in global_state.history {
-		fmt.println(i, entry.folder)
-	}
 
 	{
 		fmt.println("but reflect says:")
@@ -166,47 +145,16 @@ move_to_folder :: proc(s: ^State, folder: string) {
 
 	prev_folder := s.current_folder
 	prev_selected_folder := ""
-	can_append_history := prev_folder != ""
-	pop_history := false
-	if can_append_history {
-		if len(s.history) > 0 {
-			last_history := s.history[len(s.history) - 1]
-			if last_history.folder == folder {
-				pop_history = true
-				can_append_history = false
-			}
-		}
 
-		if can_append_history {
-			prev_selected, ok := slice.get(current_folder_entries, s.selected_entry_idx)
-			if ok {
-				prev_selected_folder = strings.clone(prev_selected.fullpath)
-			}
-		}
-	}
+	s.current_folder = folder
+	set_viewing_bookmarks(s, false)
 
-	s.current_folder    = folder
-	s.viewing_bookmarks = false
-
-	recompute_current_folder_entries(s)
+	requesting_recomput_entries = true
 
 	// store history regardless of whether updating the view worked
 
-	if pop_history {
-		// We moved somewhere that we stored the selected folder for
-		last := pop(&s.history)
-		move_to_idx_if_present(s, last.selected_folder)
-	} else {
-		// We moved out of a folder
-		move_to_idx_if_present(s, s.current_folder)
-	}
-
-	if can_append_history {
-		append(&s.history, HistoryEntry{
-			folder = prev_folder,
-			selected_folder = prev_selected_folder
-		})
-	}
+	// We moved out of a folder
+	move_to_idx_if_present(s, s.current_folder)
 }
 
 update_errorf :: proc(format: string, args: ..any) {
@@ -232,46 +180,99 @@ open_terminal_here :: proc(s: ^State) {
 	}
 }
 
-toggle_bookmarked :: proc(s: ^State, folder: string) {
-	idx := int(-1)
-	for bookmarked_folder, i in s.bookmarked_folders {
-		if bookmarked_folder == folder {
-			idx = i
-			break
+bookmark_folder :: proc(s: ^State, fullpath: string) {
+	idx := _bookmark_idx(s, fullpath)
+	if idx == -1 {
+		append(&s.bookmarked_folders, fullpath)
+	}
+
+	requesting_recomput_entries = true
+}
+
+toggle_temp_bookmarked :: proc(s: ^State, fullpath: string) {
+	assert(s.viewing_bookmarks)
+
+	for &entry in current_folder_entries {
+		if entry.fullpath == fullpath {
+			entry.bookmarked = !entry.bookmarked
 		}
 	}
-
-	if idx != -1 {
-		unordered_remove(&s.bookmarked_folders, idx)
-	} else {
-		append(&s.bookmarked_folders, folder)
-	}
-
-	recompute_current_folder_entries(s)
 }
 
 set_viewing_bookmarks :: proc(s: ^State, viewing_bookmarks: bool) {
+	folder_to_move_to := ""
+
+	if s.viewing_bookmarks {
+		s.last_bookmark_idx = selected_entry_idx
+	} else {
+		s.last_entry_idx = selected_entry_idx
+	}
+
+	if s.viewing_bookmarks && !viewing_bookmarks {
+		if len(s.bookmarked_folders) > 0 {
+			assert(len(current_folder_entries) == len(s.bookmarked_folders))
+
+			folder_to_move_to = s.bookmarked_folders[selected_entry_idx]
+
+			// Apply changes to bookmarks
+			i := 0; 
+			for i < len(s.bookmarked_folders) {
+				bookmarked_folder := s.bookmarked_folders[i]
+				is_bookmarked := false
+				for entry in current_folder_entries {
+					if entry.fullpath == bookmarked_folder {
+						is_bookmarked = entry.bookmarked
+						break
+					}
+				}
+
+				if !is_bookmarked {
+					unordered_remove(&s.bookmarked_folders, i)
+				} else {
+					i += 1
+				}
+			}
+		}
+	}
+
 	s.viewing_bookmarks = viewing_bookmarks
+
+	if viewing_bookmarks {
+		selected_entry_idx = s.last_bookmark_idx
+	} else {
+		selected_entry_idx = s.last_entry_idx
+	}
+
 	requesting_save = true
-	recompute_current_folder_entries(s)
+	requesting_recomput_entries = true
+
+	if folder_to_move_to != "" {
+		move_to_folder(s, folder_to_move_to)
+	}
 }
 
 is_bookmarked :: proc(s: ^State, fullpath: string) -> bool {
-	for bookmarked_folder in s.bookmarked_folders {
+	idx := _bookmark_idx(s, fullpath)
+	return idx != -1
+}
+
+_bookmark_idx :: proc(s: ^State, fullpath: string) -> int {
+	for bookmarked_folder, i in s.bookmarked_folders {
 		if bookmarked_folder == fullpath {
-			return true
+			return i
 		}
 	}
-	return false
+
+	return -1
 }
 
 recompute_current_folder_entries :: proc(s: ^State) -> bool {
 	update_errorf("")
 
 	if s.viewing_bookmarks {
-		s.last_bookmark_idx = s.selected_entry_idx
+		s.last_bookmark_idx = selected_entry_idx
 	} else {
-		s.last_entry_idx = s.selected_entry_idx
+		s.last_entry_idx = selected_entry_idx
 	}
 
 	arena := file_picker_arena.alloc
@@ -287,8 +288,8 @@ recompute_current_folder_entries :: proc(s: ^State) -> bool {
 			}
 		}
 
-		s.selected_entry_idx = s.last_bookmark_idx
-		s.selected_entry_idx = clamp(s.selected_entry_idx, 0, len(current_folder_entries) - 1)
+		selected_entry_idx = s.last_bookmark_idx
+		selected_entry_idx = clamp(selected_entry_idx, 0, len(current_folder_entries) - 1)
 	} else {
 		entries, err := os.read_all_directory_by_path(s.current_folder, context.allocator);
 		defer os.file_info_slice_delete(entries, context.allocator)
@@ -325,8 +326,8 @@ recompute_current_folder_entries :: proc(s: ^State) -> bool {
 			return get_order(a) < get_order(b)
 		});
 
-		s.selected_entry_idx = s.last_entry_idx
-		s.selected_entry_idx = clamp(s.selected_entry_idx, -1, len(current_folder_entries) - 1)
+		selected_entry_idx = s.last_entry_idx
+		selected_entry_idx = clamp(selected_entry_idx, -1, len(current_folder_entries) - 1)
 	}
 
 	return true

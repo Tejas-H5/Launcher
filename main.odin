@@ -5,12 +5,11 @@ import "im"
 import rl "vendor:raylib"
 import "im/rect"
 import "core:os"
+import "core:slice"
 
 BACKGROUND :: im.Color{255, 255, 255, 255}
 FOREGROUND :: im.Color{0, 0, 0, 255}
 ERROR :: im.Color{255, 0, 0, 255}
-
-folder_to_move_to := ""
 
 main :: proc() {
 	im.init_renderer("Terminal", "./font/IBMPlexMono-Regular.ttf");
@@ -34,27 +33,18 @@ main :: proc() {
 
 		// m could become a part of im somehow??
 		m := im.rect().y0
-		im.begin_split_y(&m, im.height()); {
-			im.rect_draw_text("history")
-			for entry, i in s.history {
-				if i > 0 {
-					im.rect_draw_text(" -> ")
-				}
-				im.rect_draw_text(entry.folder)
-			}
-			im.rect_draw_text(" -> ")
-			im.rect_draw_text(s.current_folder)
-			m = im.options().cursor_y + im.line_height()
-		}; im.end()
 
 		status_bar_height := im.line_height()
+		im.begin_split_y(&m, status_bar_height); {
+			im.rect_draw_text(s.current_folder)
+		}; im.end()
 
 		im.begin_split_y(&m, im.height() - status_bar_height); {
 			im.clip_rect()
 
 			im.begin(); {
 				scroll_point := im.height() / 2
-				scroll_to_item := f32(s.selected_entry_idx) * im.line_height()
+				scroll_to_item := f32(selected_entry_idx) * im.line_height()
 				if scroll_to_item > scroll_point {
 					im.options().rect.y0 = im.options().rect.y0 - scroll_to_item + scroll_point
 				}
@@ -68,7 +58,7 @@ main :: proc() {
 							fullpath   = "..",
 							name       = "..",
 							type       = .Folder,
-						}, s.selected_entry_idx == -1)
+						}, selected_entry_idx == -1)
 					}; im.end()
 				} else {
 					im.begin_split_y(&m, m + height); {
@@ -78,7 +68,7 @@ main :: proc() {
 
 				if len(current_folder_entries) > 0 {
 					for entry, i in current_folder_entries {
-						is_selected := i == s.selected_entry_idx
+						is_selected := i == selected_entry_idx
 						im.begin_split_y(&m, m + height); {
 							draw_folder_entry(entry, is_selected)
 						}; im.end()
@@ -110,13 +100,42 @@ main :: proc() {
 			}
 		}; im.end()
 
-		if is_back_pressed() {
-			if len(s.history) > 0 {
-				// NOTE: Revisiting the last visited folder will
-				// automatically pop it from the history, so we don't
-				// need to do that here
-				folder_to_move_to = s.history[len(s.history) - 1].folder
+		folder_to_move_to := ""
+
+		handled := true
+		switch {
+		case is_down_pressed():
+			selected_entry_idx += 1
+		case is_up_pressed():
+			selected_entry_idx -= 1
+		case is_page_down_pressed():
+			selected_entry_idx += 10
+		case is_page_up_pressed():
+			selected_entry_idx -= 10
+		case is_home_pressed():
+			selected_entry_idx = -1
+		case is_end_pressed():
+			selected_entry_idx = len(current_folder_entries) -1
+		case is_key_pressed_or_repeated(.T):
+			open_terminal_here(s)
+		case is_enter_pressed() || is_right_pressed():
+			entry, ok := slice.get(current_folder_entries, selected_entry_idx)
+			if ok {
+				if entry.type == .Folder {
+					folder_to_move_to = entry.fullpath
+				}
 			}
+		case is_left_pressed():
+			folder_to_move_to = ".."
+		case is_key_pressed_or_repeated(.B):
+			if s.viewing_bookmarks {
+				toggle_temp_bookmarked(s, s.current_folder)
+			} else {
+				bookmark_folder(s, s.current_folder)
+				set_viewing_bookmarks(s, true)
+			}
+		case:
+			handled = false;
 		}
 
 		if folder_to_move_to != "" {
@@ -124,44 +143,17 @@ main :: proc() {
 				folder_to_move_to = os.dir(s.current_folder)
 			}
 
-			if folder_to_move_to != s.current_folder {
+			if s.viewing_bookmarks || folder_to_move_to != s.current_folder {
 				move_to_folder(s, strings.clone(folder_to_move_to))
 				requesting_save = true
 			}
-			folder_to_move_to = ""
-		}
-
-		handled := true
-		switch {
-		case is_down_pressed():
-			s.selected_entry_idx += 1
-		case is_up_pressed():
-			s.selected_entry_idx -= 1
-		case is_page_down_pressed():
-			s.selected_entry_idx += 10
-		case is_page_up_pressed():
-			s.selected_entry_idx -= 10
-		case is_home_pressed():
-			s.selected_entry_idx = -1
-		case is_end_pressed():
-			s.selected_entry_idx = len(current_folder_entries) -1
-		case is_key_pressed_or_repeated(.T):
-			open_terminal_here(s)
-		case is_key_pressed_or_repeated(.B):
-			if rl.IsKeyDown(.LEFT_SHIFT) {
-				set_viewing_bookmarks(s, !s.viewing_bookmarks)
-			} else {
-				toggle_bookmarked(s, s.current_folder)
-			}
-		case:
-			handled = false;
 		}
 
 		if handled {
-			if s.selected_entry_idx < -1 {
-				s.selected_entry_idx = -1
-			} else if s.selected_entry_idx > len(current_folder_entries) -1 {
-				s.selected_entry_idx = len(current_folder_entries) -1
+			if selected_entry_idx < -1 {
+				selected_entry_idx = -1
+			} else if selected_entry_idx > len(current_folder_entries) -1 {
+				selected_entry_idx = len(current_folder_entries) -1
 			}
 		}
 
@@ -170,6 +162,11 @@ main :: proc() {
 		if requesting_save {
 			requesting_save = false
 			save_state()
+		}
+
+		if requesting_recomput_entries {
+			requesting_recomput_entries = false
+			recompute_current_folder_entries(s)
 		}
 	}
 }
@@ -199,10 +196,6 @@ draw_folder_entry :: proc(entry: FolderEntry, selected: bool) {
 
 	if entry.name == ".." {
 		im.rect_draw_textf("[<-]")
-
-		if is_left_pressed() {
-			folder_to_move_to = ".."
-		} 
 	}
 
 	if entry.bookmarked {
@@ -211,10 +204,6 @@ draw_folder_entry :: proc(entry: FolderEntry, selected: bool) {
 
 	if selected && entry.type == .Folder {
 		im.rect_draw_textf("[Enter] or [->]")
-
-		if is_enter_pressed() || is_right_pressed() {
-			folder_to_move_to = entry.fullpath
-		}
 	}
 }
 
