@@ -63,7 +63,6 @@ State :: struct {
 	folders_last_accessed_at: map[string]time.Time,
 }
 
-global_state: State
 SAVE_FILE :: "./save.bin"
 SAVE_FILE_JSON :: "./save.json"
 
@@ -71,7 +70,7 @@ requesting_save: bool
 requesting_recomput_entries: bool
 
 // Frees the temp allocator btw
-save_state :: proc(temp_allocator := context.temp_allocator) {
+save_state :: proc(s: ^State, temp_allocator := context.temp_allocator) {
 	file, err := os.open(SAVE_FILE, {.Write, .Create, .Trunc});
 	defer os.close(file)
 	if err != nil {
@@ -80,14 +79,15 @@ save_state :: proc(temp_allocator := context.temp_allocator) {
 	}
 
 	w := os.to_writer(file)
-	marshall_err := cbor.marshal_into_writer(w, global_state, temp_allocator=temp_allocator)
+	marshall_err := cbor.marshal_into_writer(w, s, temp_allocator=temp_allocator)
 	if marshall_err != nil {
 		update_errorf("Error saving state: %v", marshall_err)
 		return
 	}
 	defer free_all(temp_allocator)
 
-	{
+	if false {
+		// Mainly for debugging purposes
 		fmt.println("but reflect says:")
 		file, err := os.open(SAVE_FILE_JSON, {.Write, .Create, .Trunc});
 		defer os.close(file)
@@ -97,35 +97,38 @@ save_state :: proc(temp_allocator := context.temp_allocator) {
 		opts := json.Marshal_Options {
 			pretty = true
 		}
-		json.marshal_to_writer(w, global_state, &opts)
+		json.marshal_to_writer(w, s, &opts)
 	}
 
 	save_count += 1
 }
 
 // Frees the temp allocator btw
-load_state :: proc(temp_allocator := context.temp_allocator) {
+load_state :: proc(temp_allocator := context.temp_allocator) -> (state: State) {
 	file, err := os.open(SAVE_FILE, {.Read})
 	defer os.close(file)
+
 	if err == .Not_Exist {
 		return
 	}
+
 	if err != nil {
 		update_errorf("Error loading save: %v", os.error_string(err))
 		return
 	}
 
 	r := os.to_reader(file)
-	cbor.unmarshal_from_reader(r, &global_state, temp_allocator=temp_allocator)
+	cbor.unmarshal_from_reader(r, &state, temp_allocator=temp_allocator)
 	free_all(temp_allocator)
+	return
 }
 
-init_program :: proc() {
+program_init :: proc() -> State {
 	make_arena(&file_picker_arena, 10 * mem.Megabyte)
 
-	load_state()
+	state := load_state()
 
-	folder := global_state.current_folder
+	folder := state.current_folder
 	if folder == "" {
 		working_dir, err := os.get_executable_directory(context.allocator)
 		if err != nil {
@@ -134,7 +137,11 @@ init_program :: proc() {
 		folder = working_dir
 	}
 
-	move_to_folder(&global_state, folder)
+	move_to_folder(&state, folder)
+
+	free_all(context.temp_allocator)
+
+	return state
 }
 
 move_to_folder :: proc(s: ^State, folder: string) {
@@ -157,7 +164,7 @@ open_terminal_here :: proc(s: ^State) {
 	update_errorf("")
 
 	desc := os.Process_Desc{
-		command=[]string{"alacritty", "--working-directory", s.current_folder}
+		command=[]string{"alacritty", "--working-directory", s.current_folder},
 	}
 	process, err := os.process_start(desc)
 	if err != nil {
