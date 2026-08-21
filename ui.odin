@@ -144,8 +144,8 @@ ui_render_frame :: proc(s: ^State) -> bool {
 		save_state(s)
 	}
 
-	if requesting_recomput_entries {
-		requesting_recomput_entries = false
+	if requesting_recompute_entries {
+		requesting_recompute_entries = false
 		recompute_current_folder_entries(s)
 	}
 

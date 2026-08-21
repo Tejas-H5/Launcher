@@ -3,34 +3,27 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:slice"
-import "core:mem"
 import "core:strings"
 import "core:encoding/cbor"
 import "core:encoding/json"
 import "core:time"
+import "core:mem"
+
+SAVE_FILE :: "./save.bin"
+SAVE_FILE_JSON :: "./save.json"
+
+file_picker_arena: Arena
+current_folder_entries: []FolderEntry
+selected_entry_idx: int
+current_error := ""
+save_count := 0
+requesting_save: bool
+requesting_recompute_entries: bool
 
 ItemType :: enum {
 	File,
 	Folder,
 }
-
-Arena :: struct {
-	alloc: mem.Allocator,
-	arena: mem.Arena,
-}
-
-file_picker_arena: Arena
-
-make_arena :: proc(arena: ^Arena, bytes: int) {
-	memory := make([]byte, bytes)
-	mem.arena_init(&arena.arena, memory)
-	// mem.arena_allocator Requires `arena` to already have a fixed position in memory,
-	// so we can't return -> Arena here
-	arena.alloc = mem.arena_allocator(&arena.arena)
-}
-
-// Transitioning from one folder to another requires we hold onto
-// memory from the previous view while creating the next view.
 
 FolderEntry :: struct {
 	last_accessed_at : time.Time,
@@ -38,10 +31,12 @@ FolderEntry :: struct {
 	name             : string,
 	type             : ItemType,
 }
-current_folder_entries: []FolderEntry
-selected_entry_idx: int
-current_error := ""
-save_count := 0
+
+// This will eventually be persisted
+State :: struct {
+	current_folder: string,
+	folders_last_accessed_at: map[string]time.Time,
+}
 
 move_to_idx_if_present :: proc(s: ^State, folder: string) -> bool {
 	moved := false
@@ -56,18 +51,6 @@ move_to_idx_if_present :: proc(s: ^State, folder: string) -> bool {
 
 	return moved
 }
-
-// This will eventually be persisted
-State :: struct {
-	current_folder: string,
-	folders_last_accessed_at: map[string]time.Time,
-}
-
-SAVE_FILE :: "./save.bin"
-SAVE_FILE_JSON :: "./save.json"
-
-requesting_save: bool
-requesting_recomput_entries: bool
 
 // Frees the temp allocator btw
 save_state :: proc(s: ^State, temp_allocator := context.temp_allocator) {
@@ -147,7 +130,7 @@ program_init :: proc() -> State {
 move_to_folder :: proc(s: ^State, folder: string) {
 	s.current_folder = folder
 	s.folders_last_accessed_at[folder] = time.now()
-	requesting_recomput_entries = true
+	requesting_recompute_entries = true
 }
 
 update_errorf :: proc(format: string, args: ..any) {
